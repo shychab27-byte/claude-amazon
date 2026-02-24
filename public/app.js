@@ -482,11 +482,17 @@ function hideError() {
 
 function reportColor(type) {
   const colors = {
-    'FBA Manage Inventory':    '#146EB4',
-    'Inventory Health Report': '#1a7f37',
-    'Restocking Report':       '#FF9900',
-    'Inventory Ledger Report': '#6f42c1',
-    'All Orders Report':       '#0891b2',
+    'Restock Inventory':               '#FF9900',
+    'Amazon Fulfilled Inventory':      '#5b9cf6',
+    'Manage FBA Inventory':            '#3ecf74',
+    'Inventory Ledger':                '#9b87f5',
+    'Business Report - By Child ASIN': '#f0ab00',
+    // backward-compat
+    'FBA Manage Inventory':            '#5b9cf6',
+    'Inventory Health Report':         '#3ecf74',
+    'Restocking Report':               '#FF9900',
+    'Inventory Ledger Report':         '#9b87f5',
+    'All Orders Report':               '#5b9cf6',
   };
-  return colors[type] || '#6b7280';
+  return colors[type] || '#6b6b78';
 }
