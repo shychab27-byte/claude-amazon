@@ -62,8 +62,14 @@ const REPORT_SIGNATURES = {
 const VALID_SEASONS = ['spring/summer', 'fall/winter', 'year-round', 'all'];
 
 // Batching config
-const BATCH_SIZE        = 100; // SKUs per Claude call
+const BATCH_SIZE        = 150; // SKUs per Claude call
 const BATCH_CONCURRENCY = 3;   // max parallel Claude calls
+
+// In-memory progress tracker keyed by requestId
+const progressMap = new Map();
+function setProgress(requestId, data) {
+  if (requestId) progressMap.set(requestId, { ...data, ts: Date.now() });
+}
 
 function normalizeSeasonValue(val) {
   const v = String(val || '').toLowerCase().trim();
@@ -212,6 +218,24 @@ function summarizeData(parsedFiles) {
         }).length;
       }
 
+      // Aggregate multi-row-per-SKU reports to 1 summary row per SKU (major token reduction)
+      if (reportType === 'All Orders Report') {
+        const agg = aggregateOrdersReport(data);
+        block.isAggregated   = true;
+        block.aggregatedFrom = data.length;   // original event count
+        block.data           = agg;
+        block.headers        = ['sku', 'asin', 'units_sold_30d', 'units_sold_90d',
+                                 'order_count_30d', 'revenue_30d', 'last_order_date'];
+      }
+
+      if (reportType === 'Inventory Ledger Report') {
+        const agg = aggregateLedgerReport(data);
+        block.isAggregated   = true;
+        block.aggregatedFrom = data.length;
+        block.data           = agg;
+        block.headers        = ['msku', 'fnsku', 'asin', 'received', 'returns', 'removals', 'adjustments'];
+      }
+
       summary.push(block);
     }
   }
@@ -233,8 +257,11 @@ const REPORT_KEY_FIELDS = {
 };
 
 function compactRows(block) {
+  // Aggregated blocks are already compact — send them as-is
+  if (block.isAggregated) return block.data;
+
   const wantedFragments = REPORT_KEY_FIELDS[block.reportType];
-  const rows = block.data.slice(0, 100); // hard cap at 100 rows per sheet
+  const rows = block.data; // no hard row cap — batching controls volume
 
   if (!wantedFragments) return rows.slice(0, 50);
 
@@ -267,6 +294,81 @@ function extractRowKey(row) {
 
   const fnsku = String(row['fnsku'] || row['FNSKU'] || '').trim().toUpperCase();
   return fnsku || null;
+}
+
+// ─────────────────────────────────────────────
+// Server-side report aggregation (token reduction)
+// ─────────────────────────────────────────────
+
+// All Orders Report: many rows per SKU → 1 aggregated row per SKU
+function aggregateOrdersReport(data) {
+  const now        = Date.now();
+  const ms30       = 30 * 24 * 60 * 60 * 1000;
+  const ms90       = 90 * 24 * 60 * 60 * 1000;
+  const byKey      = new Map();
+
+  for (const row of data) {
+    const key = extractRowKey(row);
+    if (!key) continue;
+
+    const status = String(row['order-status'] || row['Order Status'] || '').toLowerCase();
+    if (status.includes('cancel')) continue;   // skip cancelled
+
+    const dateStr = row['purchase-date'] || row['Purchase Date'] || '';
+    const ts      = dateStr ? new Date(dateStr).getTime() : NaN;
+    const qty     = Math.max(0, parseInt(row['quantity'] || row['Quantity'] || 0) || 0);
+    const price   = parseFloat(row['item-price'] || row['item-price'] || 0) || 0;
+
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        sku:             row['sku'] || row['SKU'] || '',
+        asin:            row['asin'] || row['ASIN'] || '',
+        units_sold_30d:  0,
+        units_sold_90d:  0,
+        order_count_30d: 0,
+        revenue_30d:     0,
+        last_order_date: dateStr,
+      });
+    }
+
+    const e = byKey.get(key);
+    if (!isNaN(ts)) {
+      const age = now - ts;
+      if (age <= ms30) { e.units_sold_30d += qty; e.order_count_30d++; e.revenue_30d += price * qty; }
+      if (age <= ms90)   e.units_sold_90d += qty;
+      if (dateStr > e.last_order_date) e.last_order_date = dateStr;
+    }
+  }
+
+  return [...byKey.values()];
+}
+
+// Inventory Ledger Report: many event rows per SKU → 1 summary row per SKU
+function aggregateLedgerReport(data) {
+  const byKey = new Map();
+
+  for (const row of data) {
+    const fnsku = String(row['fnsku'] || row['FNSKU'] || '').trim().toUpperCase();
+    const msku  = String(row['msku']  || row['MSKU']  || '').trim().toUpperCase();
+    const asin  = String(row['asin']  || row['ASIN']  || '').trim().toUpperCase();
+    const key   = msku || fnsku || asin;
+    if (!key) continue;
+
+    const eventType = String(row['event type'] || row['Event Type'] || '').toLowerCase();
+    const qty       = parseInt(row['quantity']  || row['Quantity']  || 0) || 0;
+
+    if (!byKey.has(key)) {
+      byKey.set(key, { msku, fnsku, asin, received: 0, returns: 0, removals: 0, adjustments: 0 });
+    }
+
+    const e = byKey.get(key);
+    if      (eventType.includes('receipt'))         e.received    += qty;
+    else if (eventType.includes('customer return')) e.returns     += qty;
+    else if (eventType.includes('removal') || eventType.includes('dispos')) e.removals += qty;
+    else if (eventType.includes('adjustment'))      e.adjustments += qty;
+  }
+
+  return [...byKey.values()];
 }
 
 function getAllIdentifiers(summaryData) {
@@ -304,6 +406,24 @@ async function runWithConcurrency(tasks, limit) {
   }
   await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
   return results;
+}
+
+// Retry a Claude API call up to maxRetries times on rate-limit (429) errors
+async function callClaudeWithRetry(client, params, onWait = null, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await client.messages.create(params);
+    } catch (err) {
+      if (err.status === 429 && attempt < maxRetries) {
+        const waitSecs = 30;
+        console.warn(`Rate limit hit — waiting ${waitSecs}s (attempt ${attempt + 1}/${maxRetries + 1})`);
+        if (onWait) onWait(waitSecs, attempt + 1);
+        await new Promise(r => setTimeout(r, waitSecs * 1000));
+      } else {
+        throw err;
+      }
+    }
+  }
 }
 
 const PRIORITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, HOLD: 4 };
@@ -362,12 +482,18 @@ function mergeAnalysisResults(results, totalSKUs, batchCount) {
   };
 }
 
-async function analyzeInBatches(apiKey, summaryData, userNotes, targetSeason, seasonMap) {
+async function analyzeInBatches(apiKey, summaryData, userNotes, targetSeason, seasonMap, requestId = null) {
   const allIds = getAllIdentifiers(summaryData);
 
   // Small enough to run in one shot
   if (allIds.length <= BATCH_SIZE) {
-    return analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap);
+    setProgress(requestId, { stage: 'analyzing', batchCurrent: 0, batchTotal: 1, skuCount: allIds.length,
+      message: `Analyzing ${allIds.length} SKUs…` });
+    const result = await analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap,
+      null, null, requestId);
+    setProgress(requestId, { stage: 'done', batchCurrent: 1, batchTotal: 1, skuCount: allIds.length,
+      message: 'Analysis complete.' });
+    return result;
   }
 
   // Split into batches
@@ -376,15 +502,27 @@ async function analyzeInBatches(apiKey, summaryData, userNotes, targetSeason, se
     batches.push(allIds.slice(i, i + BATCH_SIZE));
   }
   console.log(`Batching: ${allIds.length} SKUs → ${batches.length} batches (concurrency ${BATCH_CONCURRENCY})`);
+  setProgress(requestId, { stage: 'analyzing', batchCurrent: 0, batchTotal: batches.length,
+    skuCount: allIds.length, message: `Splitting ${allIds.length} SKUs into ${batches.length} batches…` });
 
+  let completed = 0;
   const tasks = batches.map((batchIds, idx) => async () => {
     const batchData = filterSummaryDataForBatch(summaryData, batchIds);
     console.log(`  Batch ${idx + 1}/${batches.length}: ${batchIds.length} SKUs`);
     if (batchData.length === 0) return null;
-    return analyzeWithClaude(apiKey, batchData, userNotes, targetSeason, seasonMap, idx + 1, batches.length);
+    const result = await analyzeWithClaude(apiKey, batchData, userNotes, targetSeason, seasonMap,
+      idx + 1, batches.length, requestId);
+    completed++;
+    setProgress(requestId, {
+      stage: 'analyzing', batchCurrent: completed, batchTotal: batches.length, skuCount: allIds.length,
+      message: `Analyzed batch ${completed} of ${batches.length} (${Math.min(completed * BATCH_SIZE, allIds.length)} of ${allIds.length} SKUs)…`,
+    });
+    return result;
   });
 
   const results = await runWithConcurrency(tasks, BATCH_CONCURRENCY);
+  setProgress(requestId, { stage: 'merging', batchCurrent: batches.length, batchTotal: batches.length,
+    skuCount: allIds.length, message: 'Merging results from all batches…' });
   return mergeAnalysisResults(results.filter(Boolean), allIds.length, batches.length);
 }
 
@@ -392,7 +530,7 @@ async function analyzeInBatches(apiKey, summaryData, userNotes, targetSeason, se
 // Claude API Analysis
 // ─────────────────────────────────────────────
 
-async function analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap, batchNum = null, totalBatches = null) {
+async function analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap, batchNum = null, totalBatches = null, requestId = null) {
   const client = new Anthropic({ apiKey });
 
   const today = new Date().toISOString().slice(0, 10); // e.g. 2026-02-24
@@ -509,12 +647,21 @@ ${reportSections}
 
 Provide your analysis as valid JSON matching the schema in the system prompt.`;
 
-  const response = await client.messages.create({
+  const onRateLimitWait = (waitSecs, attempt) => {
+    const label = batchNum ? `batch ${batchNum}/${totalBatches}` : 'request';
+    console.warn(`  Rate limit on ${label} — waiting ${waitSecs}s (attempt ${attempt})`);
+    setProgress(requestId, {
+      stage: 'rate_limited', batchCurrent: batchNum ?? 0, batchTotal: totalBatches ?? 1,
+      message: `Rate limit hit on ${label}. Retrying in ${waitSecs}s… (attempt ${attempt})`,
+    });
+  };
+
+  const response = await callClaudeWithRetry(client, {
     model: 'claude-sonnet-4-6',
     max_tokens: 16000,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }]
-  });
+  }, onRateLimitWait);
 
   const text = response.content[0].text;
 
@@ -569,10 +716,16 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Progress polling endpoint
+app.get('/api/progress/:requestId', (req, res) => {
+  const data = progressMap.get(req.params.requestId);
+  res.json(data || { stage: 'unknown', message: 'No progress info yet.' });
+});
+
 // Main analyze endpoint
 app.post('/api/analyze', upload.array('files', 10), async (req, res) => {
   try {
-    const { apiKey, userNotes, targetSeason } = req.body;
+    const { apiKey, userNotes, targetSeason, requestId } = req.body;
 
     if (!apiKey || !apiKey.startsWith('sk-')) {
       return res.status(400).json({ error: 'A valid Anthropic API key is required (starts with sk-).' });
@@ -610,8 +763,12 @@ app.post('/api/analyze', upload.array('files', 10), async (req, res) => {
     const totalSKUs    = getAllIdentifiers(summaryData).length;
     const batchCount   = Math.ceil(totalSKUs / BATCH_SIZE);
     console.log(`Total unique SKUs detected: ${totalSKUs} → ${batchCount} batch(es)`);
+    setProgress(requestId, {
+      stage: 'preparing', batchCurrent: 0, batchTotal: batchCount, skuCount: totalSKUs,
+      message: `Found ${totalSKUs} SKUs across ${batchCount} batch${batchCount !== 1 ? 'es' : ''}. Starting analysis…`,
+    });
 
-    const analysis = await analyzeInBatches(apiKey, summaryData, userNotes, targetSeason, seasonMap);
+    const analysis = await analyzeInBatches(apiKey, summaryData, userNotes, targetSeason, seasonMap, requestId);
 
     // Include detection metadata in response
     const filesMeta = parsedFiles.map(f => ({
@@ -633,6 +790,9 @@ app.post('/api/analyze', upload.array('files', 10), async (req, res) => {
       batchCount,
       analysis
     });
+
+    // Clean up progress entry after 2 min
+    if (requestId) setTimeout(() => progressMap.delete(requestId), 2 * 60 * 1000);
 
   } catch (err) {
     console.error('Analysis error:', err);

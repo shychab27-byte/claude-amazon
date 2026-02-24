@@ -4,10 +4,11 @@
    ───────────────────────────────────────────── */
 
 // ── State ──────────────────────────────────────
-let selectedFiles    = [];
-let lastAnalysis     = null;
-let activeFilter     = 'ALL';
+let selectedFiles      = [];
+let lastAnalysis       = null;
+let activeFilter       = 'ALL';
 let activeSeasonFilter = 'ALL';
+let progressInterval   = null;
 
 // ── Element refs ───────────────────────────────
 const $ = id => document.getElementById(id);
@@ -30,8 +31,11 @@ const filesProcessed = $('filesProcessed');
 const summaryText    = $('summaryText');
 const replenishBody  = $('replenishBody');
 const noResults      = $('noResults');
-const exportBtn      = $('exportBtn');
-const resetBtn       = $('resetBtn');
+const exportBtn          = $('exportBtn');
+const resetBtn           = $('resetBtn');
+const progressContainer  = $('progressContainer');
+const progressFill       = $('progressFill');
+const progressText       = $('progressText');
 
 // ── API Key toggle ─────────────────────────────
 toggleKeyBtn.addEventListener('click', () => {
@@ -149,11 +153,15 @@ async function runAnalysis() {
   setLoading(true);
   resultsSection.classList.add('hidden');
 
+  const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  startProgressPolling(requestId);
+
   try {
     const formData = new FormData();
     formData.append('apiKey', apiKey);
     formData.append('userNotes', userNotesInput.value.trim());
     formData.append('targetSeason', targetSeasonInput.value);
+    formData.append('requestId', requestId);
     for (const f of selectedFiles) formData.append('files', f);
 
     const resp = await fetch('/api/analyze', {
@@ -181,8 +189,42 @@ async function runAnalysis() {
 
 function setLoading(loading) {
   analyzeBtn.disabled = loading;
-  analyzeBtnText.textContent = loading ? 'Analyzing… (large reports may take a minute)' : 'Analyze Inventory';
+  analyzeBtnText.textContent = loading ? 'Analyzing…' : 'Analyze Inventory';
   analyzeSpinner.classList.toggle('hidden', !loading);
+  if (!loading) stopProgressPolling();
+}
+
+// ── Progress polling ────────────────────────────
+function startProgressPolling(requestId) {
+  progressContainer.classList.remove('hidden');
+  progressFill.style.width = '3%';
+  progressText.textContent = 'Uploading and parsing files…';
+
+  progressInterval = setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/progress/${encodeURIComponent(requestId)}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      updateProgressUI(data);
+    } catch { /* ignore transient network errors */ }
+  }, 1500);
+}
+
+function stopProgressPolling() {
+  if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+  progressContainer.classList.add('hidden');
+}
+
+function updateProgressUI(data) {
+  if (!data || data.stage === 'unknown') return;
+
+  const total   = data.batchTotal   || 1;
+  const current = data.batchCurrent || 0;
+  // Reserve last 5% for merge step; map batches to 10–95%
+  const rawPct  = total > 0 ? (current / total) : 0;
+  const pct     = Math.round(10 + rawPct * 85);
+  progressFill.style.width = `${Math.min(95, Math.max(5, pct))}%`;
+  if (data.message) progressText.textContent = data.message;
 }
 
 // ── Render Results ─────────────────────────────

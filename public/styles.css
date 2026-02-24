@@ -205,6 +205,30 @@ body {
 }
 .file-remove:hover { color: var(--red); background: rgba(217,48,37,.08); }
 
+/* ─── Progress Bar ─── */
+.progress-container {
+  margin-top: 1rem;
+}
+.progress-track {
+  background: var(--border);
+  border-radius: 999px;
+  height: 8px;
+  overflow: hidden;
+}
+.progress-fill {
+  background: var(--orange);
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.6s ease;
+  min-width: 3%;
+}
+.progress-text {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 0.45rem;
+  text-align: center;
+}
+
 /* ─── Spinner ─── */
 .spinner {
   width: 16px;
