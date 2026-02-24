@@ -4,9 +4,10 @@
    ───────────────────────────────────────────── */
 
 // ── State ──────────────────────────────────────
-let selectedFiles = [];
-let lastAnalysis  = null;
-let activeFilter  = 'ALL';
+let selectedFiles    = [];
+let lastAnalysis     = null;
+let activeFilter     = 'ALL';
+let activeSeasonFilter = 'ALL';
 
 // ── Element refs ───────────────────────────────
 const $ = id => document.getElementById(id);
@@ -14,6 +15,7 @@ const $ = id => document.getElementById(id);
 const apiKeyInput    = $('apiKey');
 const toggleKeyBtn   = $('toggleKey');
 const userNotesInput = $('userNotes');
+const targetSeasonInput = $('targetSeason');
 const dropZone       = $('dropZone');
 const fileInput      = $('fileInput');
 const fileListEl     = $('fileList');
@@ -34,6 +36,15 @@ const resetBtn       = $('resetBtn');
 // ── API Key toggle ─────────────────────────────
 toggleKeyBtn.addEventListener('click', () => {
   apiKeyInput.type = apiKeyInput.type === 'password' ? 'text' : 'password';
+});
+
+// ── Season Selector ────────────────────────────
+document.querySelectorAll('.season-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.season-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    targetSeasonInput.value = btn.dataset.season;
+  });
 });
 
 // ── Drop Zone ──────────────────────────────────
@@ -142,6 +153,7 @@ async function runAnalysis() {
     const formData = new FormData();
     formData.append('apiKey', apiKey);
     formData.append('userNotes', userNotesInput.value.trim());
+    formData.append('targetSeason', targetSeasonInput.value);
     for (const f of selectedFiles) formData.append('files', f);
 
     const resp = await fetch('/api/analyze', {
@@ -244,23 +256,25 @@ function renderResults(data) {
 
 function renderTable(items) {
   if (items.length === 0) {
-    replenishBody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:32px;color:var(--muted)">No replenishment items found.</td></tr>';
+    replenishBody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:32px;color:var(--muted)">No replenishment items found.</td></tr>';
     noResults.classList.add('hidden');
     return;
   }
 
-  replenishBody.innerHTML = items.map((item, idx) => {
+  replenishBody.innerHTML = items.map((item) => {
     const priority  = (item.priority || 'LOW').toUpperCase();
-    const hidden    = activeFilter !== 'ALL' && priority !== activeFilter;
+    const season    = item.season || 'Unknown';
     const dos       = item.days_of_supply != null ? Number(item.days_of_supply).toFixed(0) : '—';
     const onHand    = item.current_inventory != null ? item.current_inventory : '—';
     const sold30    = item.units_sold_30d != null ? item.units_sold_30d : '—';
     const orderQty  = item.suggested_order_qty != null ? item.suggested_order_qty : '—';
     const orderBy   = item.order_by_date ? esc(item.order_by_date) : '—';
+    const seasonSrc = item.season_source === 'mapped' ? ' title="Season from your Season Map"' : (item.season_source === 'inferred' ? ' title="Season inferred from product name"' : '');
 
     return `
-      <tr data-priority="${priority}" class="${hidden ? 'hidden-row' : ''}">
+      <tr data-priority="${priority}" data-season="${esc(season)}">
         <td><span class="badge badge-${priority}" title="${esc(item.priority_reason || '')}">${priority}</span></td>
+        <td><span class="season-badge season-${seasonBadgeClass(season)}"${seasonSrc}>${seasonEmoji(season)} ${esc(season)}</span></td>
         <td>
           <div class="product-sku">${esc(item.sku || '')}</div>
           <div class="product-sku" style="margin-top:2px;color:#9ca3af">${esc(item.asin || '')}</div>
@@ -269,7 +283,7 @@ function renderTable(items) {
           <div class="product-name">${esc(item.product_name || '—')}</div>
         </td>
         <td class="num">${onHand}</td>
-        <td class="num ${dosClass(item.days_of_supply)}">${dos}</td>
+        <td class="num">${dosBadge(item.days_of_supply, dos)}</td>
         <td class="num">${sold30}</td>
         <td class="num"><strong>${orderQty}</strong></td>
         <td>${orderBy}</td>
@@ -281,19 +295,46 @@ function renderTable(items) {
   applyFilter();
 }
 
-function dosClass(dos) {
-  if (dos == null) return '';
-  if (dos <= 7)  return 'style="color:var(--red);font-weight:700"';
-  if (dos <= 21) return 'style="color:var(--yellow)"';
-  return '';
+function dosBadge(dos, formatted) {
+  if (dos == null) return '—';
+  const n = Number(dos);
+  if (n <= 7)  return `<span style="color:var(--red);font-weight:700">${formatted}</span>`;
+  if (n <= 21) return `<span style="color:var(--yellow);font-weight:600">${formatted}</span>`;
+  return formatted;
 }
 
-// ── Filter Tabs ────────────────────────────────
+function seasonBadgeClass(season) {
+  const s = String(season || '').toLowerCase();
+  if (s.includes('spring') || s.includes('summer')) return 'ss';
+  if (s.includes('fall') || s.includes('winter'))   return 'fw';
+  if (s.includes('year') || s.includes('round'))    return 'yr';
+  return 'uk';
+}
+
+function seasonEmoji(season) {
+  const s = String(season || '').toLowerCase();
+  if (s.includes('spring') || s.includes('summer')) return '☀️';
+  if (s.includes('fall') || s.includes('winter'))   return '🍂';
+  if (s.includes('year') || s.includes('round'))    return '📅';
+  return '❓';
+}
+
+// ── Priority Filter Tabs ───────────────────────
 $('filterTabs').addEventListener('click', e => {
   const tab = e.target.closest('.filter-tab');
   if (!tab) return;
   activeFilter = tab.dataset.priority;
-  document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('#filterTabs .filter-tab').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  applyFilter();
+});
+
+// ── Season Filter Tabs ─────────────────────────
+$('seasonFilterTabs').addEventListener('click', e => {
+  const tab = e.target.closest('.filter-tab');
+  if (!tab) return;
+  activeSeasonFilter = tab.dataset.season;
+  document.querySelectorAll('#seasonFilterTabs .filter-tab').forEach(t => t.classList.remove('active'));
   tab.classList.add('active');
   applyFilter();
 });
@@ -302,9 +343,11 @@ function applyFilter() {
   const rows = replenishBody.querySelectorAll('tr[data-priority]');
   let visible = 0;
   rows.forEach(row => {
-    const match = activeFilter === 'ALL' || row.dataset.priority === activeFilter;
-    row.classList.toggle('hidden-row', !match);
-    if (match) visible++;
+    const priorityMatch = activeFilter === 'ALL' || row.dataset.priority === activeFilter;
+    const seasonMatch   = activeSeasonFilter === 'ALL' || row.dataset.season === activeSeasonFilter;
+    const show = priorityMatch && seasonMatch;
+    row.classList.toggle('hidden-row', !show);
+    if (show) visible++;
   });
   noResults.classList.toggle('hidden', visible > 0);
 }
@@ -313,9 +356,11 @@ function applyFilter() {
 exportBtn.addEventListener('click', () => {
   if (!lastAnalysis || !lastAnalysis.replenishment_items) return;
 
-  const headers = ['Priority','SKU','ASIN','Product Name','On Hand','Days of Supply','Units Sold 30d','Suggested Order Qty','Order By Date','Action','Priority Reason'];
+  const headers = ['Priority','Season','Season Source','SKU','ASIN','Product Name','On Hand','Days of Supply','Units Sold 30d','Suggested Order Qty','Order By Date','Action','Priority Reason'];
   const rows = lastAnalysis.replenishment_items.map(item => [
     item.priority,
+    item.season,
+    item.season_source,
     item.sku,
     item.asin,
     item.product_name,

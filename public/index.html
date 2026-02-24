@@ -46,6 +46,29 @@
         </button>
       </div>
 
+      <label class="field-label" style="margin-top:1.25rem">
+        Planning For Season
+        <span class="hint">Claude will boost priority for in-season items and suppress off-season ones.</span>
+      </label>
+      <div class="season-selector" id="seasonSelector">
+        <button class="season-btn active" data-season="Spring/Summer">
+          <span class="season-icon">☀️</span>
+          <span class="season-label">Spring / Summer</span>
+          <span class="season-sub">Water shoes, sandals, slides…</span>
+        </button>
+        <button class="season-btn" data-season="Fall/Winter">
+          <span class="season-icon">🍂</span>
+          <span class="season-label">Fall / Winter</span>
+          <span class="season-sub">Boots, lined shoes, winter styles…</span>
+        </button>
+        <button class="season-btn" data-season="Both / Year-Round">
+          <span class="season-icon">📅</span>
+          <span class="season-label">Both / Year-Round</span>
+          <span class="season-sub">Treat all items equally</span>
+        </button>
+      </div>
+      <input type="hidden" id="targetSeason" value="Spring/Summer" />
+
       <label class="field-label" for="userNotes" style="margin-top:1.25rem">
         Additional Context <span class="optional">(optional)</span>
         <span class="hint">E.g. lead times, upcoming promotions, storage limits, target days of supply.</span>
@@ -69,8 +92,29 @@
         <strong>Restocking</strong>,
         <strong>Inventory Ledger</strong>,
         <strong>All Orders</strong>.
-        Drop multiple files at once.
+        Drop multiple files at once. You can also include a <strong>Season Map CSV</strong> to specify each SKU's season.
       </p>
+
+      <!-- Season Map helper -->
+      <div class="season-map-info" id="seasonMapInfo">
+        <div class="season-map-header">
+          <span class="season-map-icon">🗺️</span>
+          <strong>Season Map CSV</strong> <span class="optional">(optional but recommended)</span>
+        </div>
+        <p class="season-map-desc">
+          Create a simple CSV with two columns — <code>sku</code> and <code>season</code> — to tell Claude exactly which season each product belongs to.
+          Without it, Claude will infer from product names. Drop it in along with your other reports.
+        </p>
+        <div class="season-map-example">
+          <span class="example-label">Example file: <code>season-map.csv</code></span>
+          <pre class="code-block">sku,season
+WATER-SHOE-RED-M10,Spring/Summer
+WATER-SHOE-BLUE-W8,Spring/Summer
+CHELSEA-BOOT-BLK-M11,Fall/Winter
+CLASSIC-SNEAKER-WHT,Year-Round
+SLIPPER-SHERPA-M9,Fall/Winter</pre>
+        </div>
+      </div>
 
       <!-- Drop Zone -->
       <div class="drop-zone" id="dropZone">
@@ -122,13 +166,31 @@
           <button class="btn btn-outline btn-small" id="exportBtn">Export CSV</button>
         </div>
 
-        <!-- Priority filter tabs -->
-        <div class="filter-tabs" id="filterTabs">
-          <button class="filter-tab active" data-priority="ALL">All</button>
-          <button class="filter-tab" data-priority="CRITICAL">Critical</button>
-          <button class="filter-tab" data-priority="HIGH">High</button>
-          <button class="filter-tab" data-priority="MEDIUM">Medium</button>
-          <button class="filter-tab" data-priority="LOW">Low</button>
+        <!-- Filter rows -->
+        <div class="filter-row-group">
+          <!-- Priority filter tabs -->
+          <div class="filter-group">
+            <span class="filter-group-label">Priority:</span>
+            <div class="filter-tabs" id="filterTabs">
+              <button class="filter-tab active" data-priority="ALL">All</button>
+              <button class="filter-tab" data-priority="CRITICAL">Critical</button>
+              <button class="filter-tab" data-priority="HIGH">High</button>
+              <button class="filter-tab" data-priority="MEDIUM">Medium</button>
+              <button class="filter-tab" data-priority="LOW">Low</button>
+              <button class="filter-tab" data-priority="HOLD">Hold</button>
+            </div>
+          </div>
+          <!-- Season filter tabs -->
+          <div class="filter-group">
+            <span class="filter-group-label">Season:</span>
+            <div class="filter-tabs" id="seasonFilterTabs">
+              <button class="filter-tab active" data-season="ALL">All</button>
+              <button class="filter-tab" data-season="Spring/Summer">☀️ Spring/Summer</button>
+              <button class="filter-tab" data-season="Fall/Winter">🍂 Fall/Winter</button>
+              <button class="filter-tab" data-season="Year-Round">📅 Year-Round</button>
+              <button class="filter-tab" data-season="Unknown">❓ Unknown</button>
+            </div>
+          </div>
         </div>
 
         <div class="table-wrap">
@@ -136,6 +198,7 @@
             <thead>
               <tr>
                 <th>Priority</th>
+                <th>Season</th>
                 <th>SKU / ASIN</th>
                 <th>Product</th>
                 <th class="num">On Hand</th>

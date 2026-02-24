@@ -51,8 +51,36 @@ const REPORT_SIGNATURES = {
   'All Orders Report': [
     ['amazon-order-id', 'purchase-date', 'order-status', 'fulfillment-channel'],
     ['amazon-order-id', 'asin', 'quantity', 'item-price']
+  ],
+  'Season Map': [
+    ['sku', 'season'],
+    ['asin', 'season']
   ]
 };
+
+// Valid season values (normalized)
+const VALID_SEASONS = ['spring/summer', 'fall/winter', 'year-round', 'all'];
+
+function normalizeSeasonValue(val) {
+  const v = String(val || '').toLowerCase().trim();
+  if (v.includes('spring') || v.includes('summer') || v === 'ss') return 'Spring/Summer';
+  if (v.includes('fall') || v.includes('autumn') || v.includes('winter') || v === 'fw') return 'Fall/Winter';
+  if (v.includes('year') || v.includes('all') || v.includes('evergreen')) return 'Year-Round';
+  return null;
+}
+
+// Build a SKU→season lookup map from parsed Season Map rows
+function buildSeasonMap(rows) {
+  const map = {};
+  for (const row of rows) {
+    // Support both "sku" and "asin" as the key column
+    const key = String(row['sku'] || row['SKU'] || row['asin'] || row['ASIN'] || '').trim();
+    const rawSeason = row['season'] || row['Season'] || row['SEASON'] || '';
+    const season = normalizeSeasonValue(rawSeason);
+    if (key && season) map[key.toUpperCase()] = season;
+  }
+  return map;
+}
 
 function detectReportType(headers) {
   const normalizedHeaders = headers.map(h =>
@@ -122,11 +150,27 @@ function parseFile(buffer, filename) {
 // Data Summarization (before sending to Claude)
 // ─────────────────────────────────────────────
 
+// Extract season map from parsed files (returns combined lookup object)
+function extractSeasonMap(parsedFiles) {
+  let combined = {};
+  for (const file of parsedFiles) {
+    for (const sheet of file.sheets) {
+      if (sheet.reportType === 'Season Map') {
+        Object.assign(combined, buildSeasonMap(sheet.data));
+      }
+    }
+  }
+  return combined;
+}
+
 function summarizeData(parsedFiles) {
   const summary = [];
 
   for (const file of parsedFiles) {
     for (const sheet of file.sheets) {
+      // Skip season map from main data blocks — handled separately
+      if (sheet.reportType === 'Season Map') continue;
+
       const { reportType, data, headers, rowCount } = sheet;
 
       const block = {
@@ -175,8 +219,17 @@ function summarizeData(parsedFiles) {
 // Claude API Analysis
 // ─────────────────────────────────────────────
 
-async function analyzeWithClaude(apiKey, summaryData, userNotes) {
+async function analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap) {
   const client = new Anthropic({ apiKey });
+
+  const today = new Date().toISOString().slice(0, 10); // e.g. 2026-02-24
+
+  // Build the season map section for the prompt
+  const seasonMapEntries = Object.entries(seasonMap);
+  const seasonMapSection = seasonMapEntries.length > 0
+    ? `\n## Seller-Provided Season Map (${seasonMapEntries.length} SKUs mapped)\n` +
+      seasonMapEntries.slice(0, 300).map(([sku, s]) => `${sku}: ${s}`).join('\n')
+    : '';
 
   // Build a compact but complete representation of the data
   const reportSections = summaryData.map(block => {
@@ -191,7 +244,7 @@ ${block.outOfStock !== undefined ? `Out of Stock: ${block.outOfStock}` : ''}
     `.trim();
   }).join('\n\n');
 
-  const systemPrompt = `You are an Amazon FBA inventory management expert. Your job is to analyze uploaded Amazon Seller Central reports and provide clear, prioritized replenishment recommendations.
+  const systemPrompt = `You are an Amazon FBA footwear inventory management expert. Your job is to analyze Amazon Seller Central reports and provide clear, prioritized replenishment recommendations with full awareness of product seasonality.
 
 You will receive data from one or more of these report types:
 - FBA Manage Inventory: Current stock levels per SKU/ASIN
@@ -200,17 +253,40 @@ You will receive data from one or more of these report types:
 - Inventory Ledger Report: Inventory movement history
 - All Orders Report: Historical order data for velocity calculation
 
+## Seasonality Rules for Footwear
+The seller operates in footwear where seasonality is critical. You MUST apply the following logic:
+
+1. **Season assignment** — For each item, determine its season using this priority order:
+   a. Use the seller-provided season map if the SKU/ASIN appears there.
+   b. Otherwise, infer from the product name/description using common footwear signals:
+      - Spring/Summer: sandals, flip flops, water shoes, aqua shoes, beach shoes, slides, open-toe, pool shoes, sport sandals, canvas sneakers, espadrilles, boat shoes, mesh sneakers
+      - Fall/Winter: boots, snow boots, winter boots, ankle boots, Chelsea boots, lined shoes, shearling, insulated, waterproof boots, clogs, slippers, fur-lined
+      - Year-Round: sneakers (without seasonal qualifier), athletic shoes, dress shoes, loafers, oxfords, mules (when not sandal-style)
+   c. If you cannot determine the season, mark as "Unknown" and note it.
+
+2. **Season-aware priority boosting** — Today's date is ${today}. The seller is preparing for: **${targetSeason || 'both seasons'}**.
+   - If the target season is Spring/Summer: BOOST priority for Spring/Summer items (they need stock now). SUPPRESS priority for Fall/Winter items (don't order off-season inventory unnecessarily — only flag CRITICAL stockouts for those).
+   - If the target season is Fall/Winter: apply the reverse logic.
+   - If "Both / Year-Round": use standard priority rules for all seasons.
+   - Year-Round items always use standard priority rules.
+
+3. **Seasonal timing context**:
+   - Spring/Summer season typically runs March–August. FBA lead times mean sellers should start shipping water shoes, sandals etc. by early February for Spring.
+   - Fall/Winter season typically runs September–February. Sellers should start shipping boots, winter footwear by July/August.
+
 Your response MUST be structured as valid JSON with this exact schema:
 {
-  "summary": "2-3 sentence executive summary of inventory situation",
+  "summary": "2-3 sentence executive summary mentioning target season and overall inventory health",
   "urgent_action_required": boolean,
   "replenishment_items": [
     {
       "sku": "string",
       "asin": "string",
       "product_name": "string",
-      "priority": "CRITICAL | HIGH | MEDIUM | LOW",
-      "priority_reason": "string",
+      "season": "Spring/Summer | Fall/Winter | Year-Round | Unknown",
+      "season_source": "mapped | inferred | unknown",
+      "priority": "CRITICAL | HIGH | MEDIUM | LOW | HOLD",
+      "priority_reason": "string — include season reasoning if relevant",
       "current_inventory": number_or_null,
       "days_of_supply": number_or_null,
       "units_sold_30d": number_or_null,
@@ -224,26 +300,32 @@ Your response MUST be structured as valid JSON with this exact schema:
       "sku": "string",
       "asin": "string",
       "product_name": "string",
+      "season": "string",
       "concern": "string",
       "recommendation": "string"
     }
   ],
-  "insights": ["array of key observations about the inventory"],
-  "data_quality_notes": ["any missing data or report issues noticed"]
+  "insights": ["array of key observations — include seasonal readiness observations"],
+  "data_quality_notes": ["any missing data, unmapped seasons, or report issues noticed"]
 }
 
-Priority definitions:
-- CRITICAL: Stockout imminent (≤7 days supply) or already out of stock → Order immediately
-- HIGH: Low stock (8-21 days supply) → Order this week
-- MEDIUM: Getting low (22-45 days supply) → Plan order soon
-- LOW: Suggested by Amazon but not urgent (>45 days supply)
+Priority definitions (after seasonal adjustment):
+- CRITICAL: Stockout imminent (≤7 days supply) or already out of stock for IN-SEASON items → Order immediately
+- HIGH: Low stock (8-21 days supply) for in-season items → Order this week
+- MEDIUM: Getting low (22-45 days supply) for in-season items, OR CRITICAL/HIGH for off-season items → Plan accordingly
+- LOW: Suggested by Amazon but not urgent (>45 days supply) for in-season; or monitor for off-season
+- HOLD: Off-season item with sufficient stock — do not order, just hold
 
-Sort replenishment_items by priority (CRITICAL first) then by days_of_supply ascending.
-Only include items that genuinely need attention. Do not pad the list.`;
+Sort replenishment_items: CRITICAL first, then HIGH, then MEDIUM, then LOW, then HOLD. Within each priority, sort by days_of_supply ascending.
+Include HOLD items so the seller sees their full picture, but clearly mark them.
+Only include items that appear in the uploaded data.`;
 
-  const userMessage = `Please analyze my Amazon Seller Central inventory reports and tell me what I need to replenish.
+  const userMessage = `Please analyze my Amazon Seller Central footwear inventory reports.
 
-${userNotes ? `Additional context from seller: ${userNotes}\n` : ''}
+Today's date: ${today}
+Target season I'm preparing for: ${targetSeason || 'Both / Year-Round'}
+${userNotes ? `Additional context from seller: ${userNotes}` : ''}
+${seasonMapSection}
 
 ${reportSections}
 
@@ -279,7 +361,7 @@ app.get('/api/health', (req, res) => {
 // Main analyze endpoint
 app.post('/api/analyze', upload.array('files', 10), async (req, res) => {
   try {
-    const { apiKey, userNotes } = req.body;
+    const { apiKey, userNotes, targetSeason } = req.body;
 
     if (!apiKey || !apiKey.startsWith('sk-')) {
       return res.status(400).json({ error: 'A valid Anthropic API key is required (starts with sk-).' });
@@ -309,9 +391,12 @@ app.post('/api/analyze', upload.array('files', 10), async (req, res) => {
       });
     }
 
+    // Extract season map from any uploaded season map files
+    const seasonMap = extractSeasonMap(parsedFiles);
+
     // Summarize and analyze
     const summaryData = summarizeData(parsedFiles);
-    const analysis = await analyzeWithClaude(apiKey, summaryData, userNotes);
+    const analysis = await analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap);
 
     // Include detection metadata in response
     const filesMeta = parsedFiles.map(f => ({
@@ -327,6 +412,8 @@ app.post('/api/analyze', upload.array('files', 10), async (req, res) => {
       success: true,
       filesProcessed: filesMeta,
       parseErrors,
+      seasonMapCount: Object.keys(seasonMap).length,
+      targetSeason: targetSeason || 'Both / Year-Round',
       analysis
     });
 

@@ -373,6 +373,88 @@ body {
   font-size: 14px;
 }
 
+/* ─── Season Selector (setup card) ─── */
+.season-selector {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.season-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 10px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: #f9fafb;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, transform .1s;
+  text-align: center;
+}
+.season-btn:hover { border-color: var(--blue); background: rgba(20,110,180,.04); }
+.season-btn.active { border-color: var(--blue); background: rgba(20,110,180,.08); }
+.season-btn:active { transform: scale(.98); }
+.season-icon  { font-size: 22px; }
+.season-label { font-size: 13px; font-weight: 700; color: var(--text); }
+.season-sub   { font-size: 11px; color: var(--muted); line-height: 1.3; }
+
+/* ─── Season Map Info ─── */
+.season-map-info {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.season-map-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+.season-map-icon { font-size: 16px; }
+.season-map-desc { font-size: 12px; color: var(--muted); margin-bottom: 10px; line-height: 1.5; }
+.season-map-example { }
+.example-label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 4px; }
+.code-block {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  background: #fff;
+  border: 1px solid #e0f2fe;
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--text);
+  overflow-x: auto;
+  line-height: 1.6;
+}
+code { font-family: 'Courier New', monospace; font-size: 12px; background: #e0f2fe; padding: 1px 4px; border-radius: 3px; }
+
+/* ─── Season Badges (table) ─── */
+.season-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
+.season-ss { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }  /* Spring/Summer warm */
+.season-fw { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }  /* Fall/Winter cool */
+.season-yr { background: #f8fafc; color: #475569; border: 1px solid #cbd5e1; }  /* Year-Round neutral */
+.season-uk { background: #fafafa; color: #9ca3af; border: 1px solid #e5e7eb; }  /* Unknown */
+
+/* ─── Filter Row Group ─── */
+.filter-row-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.filter-group     { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.filter-group-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--muted);
+  white-space: nowrap;
+  min-width: 54px;
+}
+
 /* ─── Re-analyze Row ─── */
 .re-analyze-row { display: flex; justify-content: center; }
 
