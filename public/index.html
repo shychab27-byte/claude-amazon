@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Amazon Inventory Replenishment Tracker</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-icon">📦</span>
+        <span class="logo-text">Replenishment Tracker</span>
+        <span class="logo-sub">Amazon Seller Central</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- ── Setup Card ── -->
+    <section class="card setup-card" id="setupCard">
+      <h2 class="card-title">1. Setup</h2>
+
+      <label class="field-label" for="apiKey">
+        Anthropic API Key
+        <span class="hint">Your key is never stored — it stays in your browser session only.</span>
+      </label>
+      <div class="api-key-row">
+        <input
+          type="password"
+          id="apiKey"
+          class="input"
+          placeholder="sk-ant-..."
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button class="btn btn-outline btn-small" id="toggleKey" title="Show / Hide key">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M10.5 8a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0"/>
+            <path d="M0 8s3-5.5 8-5.5S16 8 16 8s-3 5.5-8 5.5S0 8 0 8m8 3.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7"/>
+          </svg>
+        </button>
+      </div>
+
+      <label class="field-label" for="userNotes" style="margin-top:1.25rem">
+        Additional Context <span class="optional">(optional)</span>
+        <span class="hint">E.g. lead times, upcoming promotions, storage limits, target days of supply.</span>
+      </label>
+      <textarea
+        id="userNotes"
+        class="input textarea"
+        rows="2"
+        placeholder="e.g. Our supplier lead time is 21 days. We have a Prime Day coming up in 3 weeks..."
+      ></textarea>
+    </section>
+
+    <!-- ── Upload Card ── -->
+    <section class="card upload-card" id="uploadCard">
+      <h2 class="card-title">2. Upload Reports</h2>
+
+      <p class="upload-hint">
+        Supports any of these Seller Central reports:
+        <strong>FBA Manage Inventory</strong>,
+        <strong>Inventory Health</strong>,
+        <strong>Restocking</strong>,
+        <strong>Inventory Ledger</strong>,
+        <strong>All Orders</strong>.
+        Drop multiple files at once.
+      </p>
+
+      <!-- Drop Zone -->
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5"/>
+            <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708z"/>
+          </svg>
+        </div>
+        <p class="drop-text">Drag &amp; drop files here</p>
+        <p class="drop-sub">or</p>
+        <label class="btn btn-outline" for="fileInput">Browse Files</label>
+        <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv,.txt" hidden />
+        <p class="drop-types">.xlsx &nbsp;·&nbsp; .xls &nbsp;·&nbsp; .csv &nbsp;·&nbsp; .txt</p>
+      </div>
+
+      <!-- File List -->
+      <div id="fileList" class="file-list hidden"></div>
+
+      <!-- Analyze Button -->
+      <button class="btn btn-primary btn-large" id="analyzeBtn" disabled>
+        <span id="analyzeBtnText">Analyze Inventory</span>
+        <span id="analyzeBtnSpinner" class="spinner hidden"></span>
+      </button>
+    </section>
+
+    <!-- ── Results Section ── -->
+    <section id="resultsSection" class="hidden">
+
+      <!-- Status Banner -->
+      <div id="statusBanner" class="status-banner"></div>
+
+      <!-- Files Processed -->
+      <div class="card" id="filesCard">
+        <h3 class="card-title small">Files Processed</h3>
+        <div id="filesProcessed" class="tag-group"></div>
+      </div>
+
+      <!-- Summary -->
+      <div class="card summary-card" id="summaryCard">
+        <h3 class="card-title small">Executive Summary</h3>
+        <p id="summaryText" class="summary-text"></p>
+      </div>
+
+      <!-- Replenishment Table -->
+      <div class="card" id="replenishCard">
+        <div class="card-header-row">
+          <h3 class="card-title small">Replenishment List</h3>
+          <button class="btn btn-outline btn-small" id="exportBtn">Export CSV</button>
+        </div>
+
+        <!-- Priority filter tabs -->
+        <div class="filter-tabs" id="filterTabs">
+          <button class="filter-tab active" data-priority="ALL">All</button>
+          <button class="filter-tab" data-priority="CRITICAL">Critical</button>
+          <button class="filter-tab" data-priority="HIGH">High</button>
+          <button class="filter-tab" data-priority="MEDIUM">Medium</button>
+          <button class="filter-tab" data-priority="LOW">Low</button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="replenish-table" id="replenishTable">
+            <thead>
+              <tr>
+                <th>Priority</th>
+                <th>SKU / ASIN</th>
+                <th>Product</th>
+                <th class="num">On Hand</th>
+                <th class="num">Days Supply</th>
+                <th class="num">Sold 30d</th>
+                <th class="num">Order Qty</th>
+                <th>Order By</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="replenishBody"></tbody>
+          </table>
+        </div>
+        <p id="noResults" class="no-results hidden">No items match this filter.</p>
+      </div>
+
+      <!-- Watch List -->
+      <div class="card hidden" id="watchCard">
+        <h3 class="card-title small">Watch List</h3>
+        <div id="watchList" class="watch-list"></div>
+      </div>
+
+      <!-- Insights -->
+      <div class="card hidden" id="insightsCard">
+        <h3 class="card-title small">Key Insights</h3>
+        <ul id="insightsList" class="insights-list"></ul>
+      </div>
+
+      <!-- Data Notes -->
+      <div class="card hidden" id="notesCard">
+        <h3 class="card-title small">Data Quality Notes</h3>
+        <ul id="notesList" class="insights-list muted"></ul>
+      </div>
+
+      <!-- Re-analyze -->
+      <div class="re-analyze-row">
+        <button class="btn btn-outline" id="resetBtn">Start Over</button>
+      </div>
+
+    </section>
+
+    <!-- ── Error Message ── -->
+    <div id="errorBox" class="error-box hidden">
+      <strong>Error:</strong> <span id="errorText"></span>
+    </div>
+
+  </main>
+
+  <footer class="footer">
+    Powered by Claude AI &nbsp;·&nbsp; Amazon Seller Central data stays in your browser session
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
