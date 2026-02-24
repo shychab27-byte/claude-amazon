@@ -61,6 +61,10 @@ const REPORT_SIGNATURES = {
 // Valid season values (normalized)
 const VALID_SEASONS = ['spring/summer', 'fall/winter', 'year-round', 'all'];
 
+// Batching config
+const BATCH_SIZE        = 100; // SKUs per Claude call
+const BATCH_CONCURRENCY = 3;   // max parallel Claude calls
+
 function normalizeSeasonValue(val) {
   const v = String(val || '').toLowerCase().trim();
   if (v.includes('spring') || v.includes('summer') || v === 'ss') return 'Spring/Summer';
@@ -136,7 +140,7 @@ function parseFile(buffer, filename) {
         reportType,
         headers,
         rowCount: rows.length,
-        data: rows.slice(0, 500) // cap at 500 rows to keep API payload reasonable
+        data: rows.slice(0, 5000) // load up to 5000 rows; batching controls what's sent to Claude
       });
     }
 
@@ -248,10 +252,147 @@ function compactRows(block) {
 }
 
 // ─────────────────────────────────────────────
+// Batching helpers
+// ─────────────────────────────────────────────
+
+function extractRowKey(row) {
+  const sku = String(
+    row['sku'] || row['SKU'] || row['seller-sku'] || row['Seller SKU'] ||
+    row['Seller-SKU'] || row['MSKU'] || row['msku'] || ''
+  ).trim().toUpperCase();
+  if (sku) return sku;
+
+  const asin = String(row['asin'] || row['ASIN'] || '').trim().toUpperCase();
+  if (asin) return asin;
+
+  const fnsku = String(row['fnsku'] || row['FNSKU'] || '').trim().toUpperCase();
+  return fnsku || null;
+}
+
+function getAllIdentifiers(summaryData) {
+  const seen = new Set();
+  for (const block of summaryData) {
+    for (const row of block.data) {
+      const key = extractRowKey(row);
+      if (key) seen.add(key);
+    }
+  }
+  return [...seen];
+}
+
+function filterSummaryDataForBatch(summaryData, batchIds) {
+  const batchSet = new Set(batchIds);
+  return summaryData.map(block => {
+    const filteredData = block.data.filter(row => {
+      const key = extractRowKey(row);
+      return key && batchSet.has(key);
+    });
+    if (filteredData.length === 0) return null;
+    return { ...block, data: filteredData, rowCount: filteredData.length };
+  }).filter(Boolean);
+}
+
+// Run async tasks with a concurrency limit
+async function runWithConcurrency(tasks, limit) {
+  const results = new Array(tasks.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < tasks.length) {
+      const i = nextIndex++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  return results;
+}
+
+const PRIORITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, HOLD: 4 };
+
+function mergeAnalysisResults(results, totalSKUs, batchCount) {
+  const allItems    = [];
+  const allWatch    = [];
+  const allInsights = new Set();
+  const allNotes    = new Set();
+  let urgent = false;
+
+  for (const r of results) {
+    if (!r) continue;
+    if (r.urgent_action_required) urgent = true;
+    (r.replenishment_items || []).forEach(i => allItems.push(i));
+    (r.watch_list          || []).forEach(w => allWatch.push(w));
+    (r.insights            || []).forEach(i => allInsights.add(i));
+    (r.data_quality_notes  || []).forEach(n => allNotes.add(n));
+  }
+
+  // Deduplicate by SKU — keep highest priority entry
+  const itemMap = new Map();
+  for (const item of allItems) {
+    const key = String(item.sku || item.asin || '').toUpperCase();
+    if (!key) continue;
+    const existing = itemMap.get(key);
+    const curRank  = PRIORITY_ORDER[item.priority]     ?? 99;
+    const exRank   = PRIORITY_ORDER[existing?.priority] ?? 99;
+    if (!existing || curRank < exRank) itemMap.set(key, item);
+  }
+
+  const sorted = [...itemMap.values()].sort((a, b) => {
+    const pa = PRIORITY_ORDER[a.priority] ?? 99;
+    const pb = PRIORITY_ORDER[b.priority] ?? 99;
+    if (pa !== pb) return pa - pb;
+    return (a.days_of_supply ?? 9999) - (b.days_of_supply ?? 9999);
+  });
+
+  const watchMap = new Map();
+  for (const w of allWatch) {
+    const key = String(w.sku || w.asin || '').toUpperCase();
+    if (key) watchMap.set(key, w);
+  }
+
+  const criticalCount = sorted.filter(i => i.priority === 'CRITICAL').length;
+  const highCount     = sorted.filter(i => i.priority === 'HIGH').length;
+
+  return {
+    summary: `Analyzed ${totalSKUs} SKUs across ${batchCount} batch${batchCount !== 1 ? 'es' : ''}. ` +
+             `Found ${criticalCount} CRITICAL and ${highCount} HIGH priority items requiring attention.`,
+    urgent_action_required: urgent,
+    replenishment_items:    sorted,
+    watch_list:             [...watchMap.values()],
+    insights:               [...allInsights],
+    data_quality_notes:     [...allNotes],
+  };
+}
+
+async function analyzeInBatches(apiKey, summaryData, userNotes, targetSeason, seasonMap) {
+  const allIds = getAllIdentifiers(summaryData);
+
+  // Small enough to run in one shot
+  if (allIds.length <= BATCH_SIZE) {
+    return analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap);
+  }
+
+  // Split into batches
+  const batches = [];
+  for (let i = 0; i < allIds.length; i += BATCH_SIZE) {
+    batches.push(allIds.slice(i, i + BATCH_SIZE));
+  }
+  console.log(`Batching: ${allIds.length} SKUs → ${batches.length} batches (concurrency ${BATCH_CONCURRENCY})`);
+
+  const tasks = batches.map((batchIds, idx) => async () => {
+    const batchData = filterSummaryDataForBatch(summaryData, batchIds);
+    console.log(`  Batch ${idx + 1}/${batches.length}: ${batchIds.length} SKUs`);
+    if (batchData.length === 0) return null;
+    return analyzeWithClaude(apiKey, batchData, userNotes, targetSeason, seasonMap, idx + 1, batches.length);
+  });
+
+  const results = await runWithConcurrency(tasks, BATCH_CONCURRENCY);
+  return mergeAnalysisResults(results.filter(Boolean), allIds.length, batches.length);
+}
+
+// ─────────────────────────────────────────────
 // Claude API Analysis
 // ─────────────────────────────────────────────
 
-async function analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap) {
+async function analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap, batchNum = null, totalBatches = null) {
   const client = new Anthropic({ apiKey });
 
   const today = new Date().toISOString().slice(0, 10); // e.g. 2026-02-24
@@ -353,11 +494,15 @@ Sort replenishment_items: CRITICAL first, then HIGH, then MEDIUM, then LOW, then
 Include HOLD items so the seller sees their full picture, but clearly mark them.
 Only include items that appear in the uploaded data.`;
 
+  const batchNote = batchNum
+    ? `\nNote: This is batch ${batchNum} of ${totalBatches}. Analyze ONLY the SKUs in this batch's data — do not comment on missing data from other batches.\n`
+    : '';
+
   const userMessage = `Please analyze my Amazon Seller Central footwear inventory reports.
 
 Today's date: ${today}
 Target season I'm preparing for: ${targetSeason || 'Both / Year-Round'}
-${userNotes ? `Additional context from seller: ${userNotes}` : ''}
+${userNotes ? `Additional context from seller: ${userNotes}` : ''}${batchNote}
 ${seasonMapSection}
 
 ${reportSections}
@@ -460,9 +605,13 @@ app.post('/api/analyze', upload.array('files', 10), async (req, res) => {
     // Extract season map from any uploaded season map files
     const seasonMap = extractSeasonMap(parsedFiles);
 
-    // Summarize and analyze
-    const summaryData = summarizeData(parsedFiles);
-    const analysis = await analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, seasonMap);
+    // Summarize and analyze (auto-batches if SKU count > BATCH_SIZE)
+    const summaryData  = summarizeData(parsedFiles);
+    const totalSKUs    = getAllIdentifiers(summaryData).length;
+    const batchCount   = Math.ceil(totalSKUs / BATCH_SIZE);
+    console.log(`Total unique SKUs detected: ${totalSKUs} → ${batchCount} batch(es)`);
+
+    const analysis = await analyzeInBatches(apiKey, summaryData, userNotes, targetSeason, seasonMap);
 
     // Include detection metadata in response
     const filesMeta = parsedFiles.map(f => ({
@@ -478,8 +627,10 @@ app.post('/api/analyze', upload.array('files', 10), async (req, res) => {
       success: true,
       filesProcessed: filesMeta,
       parseErrors,
-      seasonMapCount: Object.keys(seasonMap).length,
-      targetSeason: targetSeason || 'Both / Year-Round',
+      seasonMapCount:   Object.keys(seasonMap).length,
+      targetSeason:     targetSeason || 'Both / Year-Round',
+      totalSKUsAnalyzed: totalSKUs,
+      batchCount,
       analysis
     });
 

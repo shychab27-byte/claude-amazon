@@ -181,7 +181,7 @@ async function runAnalysis() {
 
 function setLoading(loading) {
   analyzeBtn.disabled = loading;
-  analyzeBtnText.textContent = loading ? 'Analyzing…' : 'Analyze Inventory';
+  analyzeBtnText.textContent = loading ? 'Analyzing… (large reports may take a minute)' : 'Analyze Inventory';
   analyzeSpinner.classList.toggle('hidden', !loading);
 }
 
@@ -199,7 +199,10 @@ function renderResults(data) {
   }
 
   // Files processed
-  filesProcessed.innerHTML = (data.filesProcessed || []).flatMap(f =>
+  const skuTag = data.totalSKUsAnalyzed
+    ? `<span class="tag"><span class="tag-dot" style="background:#6b7280"></span>${data.totalSKUsAnalyzed} SKUs analyzed${data.batchCount > 1 ? ` (${data.batchCount} batches)` : ''}</span>`
+    : '';
+  filesProcessed.innerHTML = skuTag + (data.filesProcessed || []).flatMap(f =>
     f.sheets.map(s => `
       <span class="tag">
         <span class="tag-dot" style="background:${reportColor(s.reportType)}"></span>
