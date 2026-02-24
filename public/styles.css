@@ -205,6 +205,17 @@ body {
 }
 .file-remove:hover { color: var(--red); background: rgba(217,48,37,.08); }
 
+/* ─── Qty Comparison Cells ─── */
+.qty-amz { color: var(--blue); }
+.qty-discrepancy {
+  display: inline-block;
+  margin-left: 4px;
+  color: var(--yellow);
+  font-size: 0.85em;
+  cursor: help;
+  vertical-align: middle;
+}
+
 /* ─── Progress Bar ─── */
 .progress-container {
   margin-top: 1rem;

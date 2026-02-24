@@ -301,20 +301,39 @@ function renderResults(data) {
 
 function renderTable(items) {
   if (items.length === 0) {
-    replenishBody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:32px;color:var(--muted)">No replenishment items found.</td></tr>';
+    replenishBody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:32px;color:var(--muted)">No replenishment items found.</td></tr>';
     noResults.classList.add('hidden');
     return;
   }
 
   replenishBody.innerHTML = items.map((item) => {
-    const priority  = (item.priority || 'LOW').toUpperCase();
-    const season    = item.season || 'Unknown';
-    const dos       = item.days_of_supply != null ? Number(item.days_of_supply).toFixed(0) : '—';
-    const onHand    = item.current_inventory != null ? item.current_inventory : '—';
-    const sold30    = item.units_sold_30d != null ? item.units_sold_30d : '—';
-    const orderQty  = item.suggested_order_qty != null ? item.suggested_order_qty : '—';
-    const orderBy   = item.order_by_date ? esc(item.order_by_date) : '—';
-    const seasonSrc = item.season_source === 'mapped' ? ' title="Season from your Season Map"' : (item.season_source === 'inferred' ? ' title="Season inferred from product name"' : '');
+    const priority   = (item.priority || 'LOW').toUpperCase();
+    const season     = item.season || 'Unknown';
+    const dos        = item.days_of_supply != null ? Number(item.days_of_supply).toFixed(0) : '—';
+    // Support both old field name (current_inventory) and new (current_stock)
+    const stock      = (item.current_stock ?? item.current_inventory) != null
+                       ? (item.current_stock ?? item.current_inventory) : '—';
+    const sold30     = item.units_sold_30d != null ? item.units_sold_30d : '—';
+    const ourQty     = item.our_suggested_qty  ?? item.suggested_order_qty;  // backward compat
+    const amzQty     = item.amazon_suggested_qty;
+    const orderBy    = item.order_by_date ? esc(item.order_by_date) : '—';
+    const seasonSrc  = item.season_source === 'mapped'
+      ? ' title="Season from your Season Map"'
+      : item.season_source === 'inferred' ? ' title="Season inferred from product name"' : '';
+
+    // Qty discrepancy indicator
+    const discrepancyTitle = item.qty_discrepancy_flag
+      ? ` title="${esc(item.qty_discrepancy_flag)}"` : '';
+    const discrepancyIcon  = item.qty_discrepancy_flag
+      ? `<span class="qty-discrepancy" ${discrepancyTitle}>⚠</span>` : '';
+
+    const amzCell = amzQty != null
+      ? `<span class="qty-amz">${amzQty}</span>`
+      : '<span style="color:var(--muted)">—</span>';
+
+    const ourCell = ourQty != null
+      ? `<strong>${ourQty}</strong>${discrepancyIcon}`
+      : '—';
 
     return `
       <tr data-priority="${priority}" data-season="${esc(season)}">
@@ -327,10 +346,11 @@ function renderTable(items) {
         <td class="product-cell">
           <div class="product-name">${esc(item.product_name || '—')}</div>
         </td>
-        <td class="num">${onHand}</td>
+        <td class="num">${stock}</td>
         <td class="num">${dosBadge(item.days_of_supply, dos)}</td>
         <td class="num">${sold30}</td>
-        <td class="num"><strong>${orderQty}</strong></td>
+        <td class="num">${amzCell}</td>
+        <td class="num">${ourCell}</td>
         <td>${orderBy}</td>
         <td class="action-cell">${esc(item.action || '')}</td>
       </tr>
@@ -401,7 +421,7 @@ function applyFilter() {
 exportBtn.addEventListener('click', () => {
   if (!lastAnalysis || !lastAnalysis.replenishment_items) return;
 
-  const headers = ['Priority','Season','Season Source','SKU','ASIN','Product Name','On Hand','Days of Supply','Units Sold 30d','Suggested Order Qty','Order By Date','Action','Priority Reason'];
+  const headers = ['Priority','Season','Season Source','SKU','ASIN','Product Name','Current Stock','Days of Supply','Units Sold 30d','Amazon Suggested Qty','Our Suggested Qty','Qty Discrepancy Note','Order By Date','Action','Priority Reason'];
   const rows = lastAnalysis.replenishment_items.map(item => [
     item.priority,
     item.season,
@@ -409,10 +429,12 @@ exportBtn.addEventListener('click', () => {
     item.sku,
     item.asin,
     item.product_name,
-    item.current_inventory,
+    item.current_stock ?? item.current_inventory,
     item.days_of_supply,
     item.units_sold_30d,
-    item.suggested_order_qty,
+    item.amazon_suggested_qty,
+    item.our_suggested_qty ?? item.suggested_order_qty,
+    item.qty_discrepancy_flag,
     item.order_by_date,
     item.action,
     item.priority_reason

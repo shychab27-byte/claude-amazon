@@ -32,26 +32,51 @@ const upload = multer({
 // ─────────────────────────────────────────────
 
 const REPORT_SIGNATURES = {
-  'FBA Manage Inventory': [
-    ['sku', 'asin', 'fnsku', 'available', 'fulfillable'],
+  // ── 5 primary report formats (most specific checked first) ───────
+
+  // Business Report: unique "Child ASIN" + "Units Ordered" columns
+  'Business Report - By Child ASIN': [
+    ['child asin', 'units ordered', 'sessions'],
+    ['child asin', 'ordered product sales', 'buy box percentage']
+  ],
+
+  // Amazon Fulfilled Inventory: distinguished by hyphenated AFN + MFN columns
+  'Amazon Fulfilled Inventory': [
+    ['afn-fulfillable-qty', 'mfn-fulfillable-qty'],
+    ['afn fulfillable qty', 'mfn listing exists']
+  ],
+
+  // Restock Inventory (Amazon's own suggestions) — multiple format variants
+  'Restock Inventory': [
+    ['recommended replenishment qty', 'days of supply'],         // current format
+    ['recommended order quantity', 'reorder point'],             // alternate
+    ['suggested order quantity', 'order by date', 'max inventory level'], // older
+    ['units sold per day', 'suggested order quantity']           // legacy
+  ],
+
+  // Inventory Ledger: event-based, has "event type" + "fulfillment center"
+  'Inventory Ledger': [
+    ['event type', 'fulfillment center', 'disposition', 'fnsku'],
+    ['event type', 'fnsku', 'quantity', 'msku']
+  ],
+
+  // Manage FBA Inventory: simple available/reserved/inbound columns
+  'Manage FBA Inventory': [
+    ['sku', 'fnsku', 'asin', 'available'],
     ['seller-sku', 'asin', 'condition', 'available']
   ],
+
+  // ── Backward-compatible names (kept for older uploads) ───────────
   'Inventory Health Report': [
     ['inventory age', 'sell through', 'days of supply'],
     ['inv age', 'units sold (last 30 days)', 'days of supply']
-  ],
-  'Restocking Report': [
-    ['suggested order quantity', 'order by date', 'max inventory level'],
-    ['units sold per day', 'suggested order quantity']
-  ],
-  'Inventory Ledger Report': [
-    ['event type', 'fulfillment center', 'disposition', 'reconciled quantity'],
-    ['fnsku', 'event type', 'quantity', 'fulfillment center']
   ],
   'All Orders Report': [
     ['amazon-order-id', 'purchase-date', 'order-status', 'fulfillment-channel'],
     ['amazon-order-id', 'asin', 'quantity', 'item-price']
   ],
+
+  // ── Season Map ───────────────────────────────────────────────────
   'Season Map': [
     ['sku', 'season'],
     ['asin', 'season']
@@ -193,15 +218,12 @@ function summarizeData(parsedFiles) {
       };
 
       // Add computed stats for known report types
-      if (reportType === 'Restocking Report') {
-        block.criticalItems = data.filter(row => {
-          const dos = parseFloat(row['Days of Supply'] || row['days of supply'] || 0);
-          return dos >= 0 && dos <= 14;
-        }).length;
-        block.lowItems = data.filter(row => {
-          const dos = parseFloat(row['Days of Supply'] || row['days of supply'] || 0);
-          return dos > 14 && dos <= 30;
-        }).length;
+      if (reportType === 'Restock Inventory' || reportType === 'Restocking Report') {
+        const getDOS = r => parseFloat(
+          r['Days of Supply at Amazon'] || r['Days of Supply'] || r['days of supply'] || r['Days of supply'] || 0
+        );
+        block.criticalItems = data.filter(r => { const d = getDOS(r); return d >= 0 && d <= 14; }).length;
+        block.lowItems      = data.filter(r => { const d = getDOS(r); return d > 14 && d <= 30; }).length;
       }
 
       if (reportType === 'Inventory Health Report') {
@@ -211,11 +233,26 @@ function summarizeData(parsedFiles) {
         }).length;
       }
 
-      if (reportType === 'FBA Manage Inventory') {
+      if (reportType === 'Amazon Fulfilled Inventory') {
+        block.outOfStock = data.filter(row => {
+          const qty = parseInt(row['afn-fulfillable-qty'] || row['AFN Fulfillable Qty'] || 0);
+          return qty === 0;
+        }).length;
+        block.unsellableUnits = data.reduce((sum, row) => {
+          return sum + (parseInt(row['afn-unsellable-qty'] || row['AFN Unsellable Qty'] || 0) || 0);
+        }, 0);
+      }
+
+      if (reportType === 'Manage FBA Inventory' || reportType === 'FBA Manage Inventory') {
         block.outOfStock = data.filter(row => {
           const avail = parseInt(row['Available'] || row['available'] || 0);
           return avail === 0;
         }).length;
+      }
+
+      // Business Report is compact (1 row per Child ASIN) — include in EVERY batch as global context
+      if (reportType === 'Business Report - By Child ASIN') {
+        block.isGlobalContext = true;
       }
 
       // Aggregate multi-row-per-SKU reports to 1 summary row per SKU (major token reduction)
@@ -249,6 +286,13 @@ function summarizeData(parsedFiles) {
 
 // Fields to keep per report type (lowercase fragments for flexible matching)
 const REPORT_KEY_FIELDS = {
+  // Primary 5 report types
+  'Restock Inventory':               ['sku', 'asin', 'fnsku', 'product', 'days of supply', 'recommended', 'reorder point', 'units sold', 'max inventory', 'ship date'],
+  'Amazon Fulfilled Inventory':      ['sku', 'asin', 'fnsku', 'product', 'afn-fulfillable', 'afn-unsellable', 'afn-warehouse', 'mfn-fulfillable', 'afn-inbound', 'afn-reserved'],
+  'Manage FBA Inventory':            ['sku', 'asin', 'fnsku', 'product', 'available', 'reserved', 'inbound'],
+  'Inventory Ledger':                ['fnsku', 'asin', 'msku', 'event type', 'quantity', 'fulfillment center', 'date'],
+  'Business Report - By Child ASIN': ['child asin', 'title', 'units ordered', 'sessions', 'buy box', 'ordered product sales', 'unit session'],
+  // Backward-compatible names
   'Restocking Report':       ['sku', 'asin', 'fnsku', 'product', 'days of supply', 'suggested order', 'order by date', 'units sold per day', 'max inventory'],
   'Inventory Health Report': ['sku', 'asin', 'product', 'days of supply', 'sell through', 'units sold', 'inv age'],
   'FBA Manage Inventory':    ['sku', 'asin', 'fnsku', 'product', 'available', 'reserved', 'inbound'],
@@ -289,7 +333,10 @@ function extractRowKey(row) {
   ).trim().toUpperCase();
   if (sku) return sku;
 
-  const asin = String(row['asin'] || row['ASIN'] || '').trim().toUpperCase();
+  // Also check "Child ASIN" column from Business Reports
+  const asin = String(
+    row['asin'] || row['ASIN'] || row['Child ASIN'] || row['child asin'] || ''
+  ).trim().toUpperCase();
   if (asin) return asin;
 
   const fnsku = String(row['fnsku'] || row['FNSKU'] || '').trim().toUpperCase();
@@ -385,6 +432,9 @@ function getAllIdentifiers(summaryData) {
 function filterSummaryDataForBatch(summaryData, batchIds) {
   const batchSet = new Set(batchIds);
   return summaryData.map(block => {
+    // Global-context blocks (e.g. Business Report By Child ASIN) go into every batch intact
+    if (block.isGlobalContext) return block;
+
     const filteredData = block.data.filter(row => {
       const key = extractRowKey(row);
       return key && batchSet.has(key);
@@ -545,25 +595,36 @@ async function analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, s
   // Build a compact representation — key fields only, capped rows
   const reportSections = summaryData.map(block => {
     const compacted = compactRows(block);
-    const dataStr = JSON.stringify(compacted, null, 0);
+    const dataStr   = JSON.stringify(compacted, null, 0);
+    const rowDesc   = block.isAggregated
+      ? `aggregated ${block.aggregatedFrom} events → ${compacted.length} SKUs`
+      : block.isGlobalContext
+        ? `global context, ${compacted.length} rows`
+        : `${block.rowCount} total rows, showing ${compacted.length}`;
     return `
-## ${block.reportType} (${block.fileName}, ${block.rowCount} total rows, showing ${compacted.length})
+## ${block.reportType} (${block.fileName}, ${rowDesc})
 Headers: ${block.headers.join(', ')}
 Data: ${dataStr}
-${block.criticalItems !== undefined ? `Critical (≤14 days supply): ${block.criticalItems}` : ''}
-${block.lowItems !== undefined ? `Low (15-30 days supply): ${block.lowItems}` : ''}
-${block.outOfStock !== undefined ? `Out of Stock: ${block.outOfStock}` : ''}
+${block.criticalItems   !== undefined ? `Critical (≤14 days supply): ${block.criticalItems}` : ''}
+${block.lowItems        !== undefined ? `Low (15-30 days supply): ${block.lowItems}` : ''}
+${block.outOfStock      !== undefined ? `Out of Stock: ${block.outOfStock}` : ''}
+${block.unsellableUnits !== undefined ? `Unsellable Units: ${block.unsellableUnits}` : ''}
     `.trim();
   }).join('\n\n');
 
   const systemPrompt = `You are an Amazon FBA footwear inventory management expert. Your job is to analyze Amazon Seller Central reports and provide clear, prioritized replenishment recommendations with full awareness of product seasonality.
 
-You will receive data from one or more of these report types:
-- FBA Manage Inventory: Current stock levels per SKU/ASIN
-- Inventory Health Report: Days of supply, sell-through rate, aged inventory
-- Restocking Report: Amazon's suggested quantities, order-by dates
-- Inventory Ledger Report: Inventory movement history
-- All Orders Report: Historical order data for velocity calculation
+You will receive data from these five Amazon Seller Central report types:
+- **Inventory Ledger** (90-day): All inventory movements pre-aggregated to one row per SKU — shows net received, returns, removals, and adjustments.
+- **Restock Inventory**: Amazon's own restocking suggestions. Key fields: the recommended quantity column (may be named "Recommended replenishment qty", "Recommended Order Quantity", or "Suggested Order Quantity"), "Days of Supply at Amazon", and "Recommended ship date" / "Order by date".
+- **Amazon Fulfilled Inventory**: Current FBA stock snapshot. Key fields: afn-fulfillable-qty (sellable), afn-unsellable-qty (stranded/damaged), afn-warehouse-qty (total at FC).
+- **Manage FBA Inventory**: Fulfillable, reserved, and inbound unit breakdown.
+- **Business Report - By Child ASIN** (90-day): Sales velocity by ASIN. The "Units Ordered" column is the total units sold in the 90-day window. Match to SKUs via ASIN.
+
+## Velocity Calculation
+Use the **Business Report's "Units Ordered"** as your primary velocity source — it is the most accurate. Divide by 90 for daily velocity, then multiply by 30 for a 30-day estimate.
+- Match Business Report rows to SKUs/ASINs from other reports using the Child ASIN column.
+- If the Business Report is not available or an ASIN doesn't appear, fall back to "Units sold per day" from the Restock Inventory report, or derive from the Inventory Ledger.
 
 ## Seasonality Rules for Footwear
 The seller operates in footwear where seasonality is critical. You MUST apply the following logic:
@@ -586,6 +647,16 @@ The seller operates in footwear where seasonality is critical. You MUST apply th
    - Spring/Summer season typically runs March–August. FBA lead times mean sellers should start shipping water shoes, sandals etc. by early February for Spring.
    - Fall/Winter season typically runs September–February. Sellers should start shipping boots, winter footwear by July/August.
 
+## Cross-referencing Amazon's Suggestions
+The Restock Inventory report contains Amazon's own replenishment recommendation per SKU. For each item:
+1. Set **amazon_suggested_qty** = the value from the Restock Inventory report's recommended quantity column (null if the SKU isn't in that report).
+2. Calculate **our_suggested_qty** = your own recommendation based on: velocity (from Business Report), current fulfillable stock (from Amazon Fulfilled Inventory or Manage FBA), days of supply, seasonal urgency, and a target of 60 days of supply for in-season items.
+3. If amazon_suggested_qty and our_suggested_qty differ by more than 25%, set **qty_discrepancy_flag** to a concise explanation, e.g.:
+   - "Amazon suggests 2× more — may reflect Amazon's safety stock model or a promotion"
+   - "We suggest 40% more due to strong in-season velocity not yet in Amazon's model"
+   - "Amazon suggests ordering but days of supply is 90+ — verify velocity data"
+4. If they're within 25% of each other, set qty_discrepancy_flag to null.
+
 Your response MUST be structured as valid JSON with this exact schema:
 {
   "summary": "2-3 sentence executive summary mentioning target season and overall inventory health",
@@ -599,10 +670,12 @@ Your response MUST be structured as valid JSON with this exact schema:
       "season_source": "mapped | inferred | unknown",
       "priority": "CRITICAL | HIGH | MEDIUM | LOW | HOLD",
       "priority_reason": "string — include season reasoning if relevant",
-      "current_inventory": number_or_null,
+      "current_stock": number_or_null,
       "days_of_supply": number_or_null,
       "units_sold_30d": number_or_null,
-      "suggested_order_qty": number_or_null,
+      "amazon_suggested_qty": number_or_null,
+      "our_suggested_qty": number_or_null,
+      "qty_discrepancy_flag": "string_or_null",
       "order_by_date": "string_or_null",
       "action": "string describing what to do"
     }
