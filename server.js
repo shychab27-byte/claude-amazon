@@ -216,6 +216,38 @@ function summarizeData(parsedFiles) {
 }
 
 // ─────────────────────────────────────────────
+// Data Compaction (key fields only, per report type)
+// ─────────────────────────────────────────────
+
+// Fields to keep per report type (lowercase fragments for flexible matching)
+const REPORT_KEY_FIELDS = {
+  'Restocking Report':       ['sku', 'asin', 'fnsku', 'product', 'days of supply', 'suggested order', 'order by date', 'units sold per day', 'max inventory'],
+  'Inventory Health Report': ['sku', 'asin', 'product', 'days of supply', 'sell through', 'units sold', 'inv age'],
+  'FBA Manage Inventory':    ['sku', 'asin', 'fnsku', 'product', 'available', 'reserved', 'inbound'],
+  'Inventory Ledger Report': ['fnsku', 'asin', 'msku', 'event type', 'quantity', 'fulfillment center', 'date'],
+  'All Orders Report':       ['order-id', 'asin', 'sku', 'quantity', 'item-price', 'purchase-date', 'order-status'],
+};
+
+function compactRows(block) {
+  const wantedFragments = REPORT_KEY_FIELDS[block.reportType];
+  const rows = block.data.slice(0, 100); // hard cap at 100 rows per sheet
+
+  if (!wantedFragments) return rows.slice(0, 50);
+
+  return rows.map(row => {
+    const compact = {};
+    for (const [key, val] of Object.entries(row)) {
+      const keyLower = key.toLowerCase().trim();
+      if (wantedFragments.some(f => keyLower.includes(f) || f.includes(keyLower))) {
+        compact[key] = val;
+      }
+    }
+    // Always keep at least the raw row if nothing matched (fallback)
+    return Object.keys(compact).length > 0 ? compact : row;
+  });
+}
+
+// ─────────────────────────────────────────────
 // Claude API Analysis
 // ─────────────────────────────────────────────
 
@@ -231,13 +263,14 @@ async function analyzeWithClaude(apiKey, summaryData, userNotes, targetSeason, s
       seasonMapEntries.slice(0, 300).map(([sku, s]) => `${sku}: ${s}`).join('\n')
     : '';
 
-  // Build a compact but complete representation of the data
+  // Build a compact representation — key fields only, capped rows
   const reportSections = summaryData.map(block => {
-    const dataStr = JSON.stringify(block.data.slice(0, 150), null, 0);
+    const compacted = compactRows(block);
+    const dataStr = JSON.stringify(compacted, null, 0);
     return `
-## ${block.reportType} (${block.fileName}, ${block.rowCount} rows)
+## ${block.reportType} (${block.fileName}, ${block.rowCount} total rows, showing ${compacted.length})
 Headers: ${block.headers.join(', ')}
-Data (up to 150 rows): ${dataStr}
+Data: ${dataStr}
 ${block.criticalItems !== undefined ? `Critical (≤14 days supply): ${block.criticalItems}` : ''}
 ${block.lowItems !== undefined ? `Low (15-30 days supply): ${block.lowItems}` : ''}
 ${block.outOfStock !== undefined ? `Out of Stock: ${block.outOfStock}` : ''}
@@ -333,7 +366,7 @@ Provide your analysis as valid JSON matching the schema in the system prompt.`;
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 8096,
+    max_tokens: 16000,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }]
   });
@@ -346,7 +379,40 @@ Provide your analysis as valid JSON matching the schema in the system prompt.`;
     throw new Error('Could not parse JSON response from Claude. Raw response: ' + text.slice(0, 500));
   }
 
-  return JSON.parse(jsonMatch[1]);
+  let jsonStr = jsonMatch[1];
+
+  // Detect and repair truncated JSON caused by token limits
+  if (response.stop_reason === 'max_tokens') {
+    console.warn('Warning: Claude response hit max_tokens limit — attempting JSON repair');
+    // Close any open arrays/objects by counting brackets
+    const opens = (jsonStr.match(/[\[{]/g) || []).length;
+    const closes = (jsonStr.match(/[\]}]/g) || []).length;
+    const deficit = opens - closes;
+    if (deficit > 0) {
+      // Trim to last complete object in the replenishment_items array if possible
+      const lastCompleteObj = jsonStr.lastIndexOf('},');
+      if (lastCompleteObj > 0) {
+        jsonStr = jsonStr.slice(0, lastCompleteObj + 1); // end after last }
+      }
+      // Re-close all open structures
+      for (let i = 0; i < deficit; i++) {
+        jsonStr += (jsonStr.trimEnd().endsWith(']') || jsonStr.trimEnd().endsWith('}')) ? '' : '';
+      }
+      // Best-effort: close arrays then object
+      jsonStr = jsonStr.replace(/,\s*$/, ''); // remove trailing comma
+      jsonStr += ']}'; // close replenishment_items array + root object
+      console.warn('Attempted JSON repair. Result may be partial.');
+    }
+  }
+
+  try {
+    return JSON.parse(jsonStr);
+  } catch (parseErr) {
+    throw new Error(
+      `Failed to parse Claude's JSON response: ${parseErr.message}. ` +
+      `This usually means your report has too many SKUs. Try uploading one report at a time, or filter your report to fewer SKUs before uploading.`
+    );
+  }
 }
 
 // ─────────────────────────────────────────────
